@@ -1,186 +1,210 @@
-"""k
-Simple Substitution Cipher Example
-------------------------
-In this example, we'll use a simple substitution cipher to demonstrate
-how to learn the emission probabilities of a Hidden Markov Model (HMM).
-The transition probabilities are fixed according to a bigram language
-model. We observe some ciphertext and wish to learn the emission probabilities
-that maximize the likelihood of the observed ciphertext. Once we have learned
-the emission probabilities, we can use the Viterbi algorithm to find the most
-likely plaintext.
-"""
-
-#%%
-# First, lets create a simple substitution cipher.
-import string
 import random
 from collections import Counter
-
-# set seed
-random.seed(43)
-
-#%%
-# let's create a bigram character level language model.
-# We'll use the Brown corpus to train the language model.
-from nltk.corpus import brown
-from nltk.util import ngrams
-from nltk.lm.preprocessing import padded_everygram_pipeline
-from nltk.lm import MLE
-
-# get the first 1000 sentences from the Brown corpus
-brown_sents = brown.sents()[:1_000_000]
-# lowercase and remove special characters
-brown_sents = [[word.lower() for word in sent if word.isalpha()] for sent in brown_sents]
-# join words into sentences
-brown_sents = [' '.join(sent) for sent in brown_sents]
-print(f"{brown_sents[0]=}")
-#%%
-# tokenize the sentences into characters
-brown_sents = [list(sent) for sent in brown_sents]
-print(f"{brown_sents[0]=}")
-
-#%%
-# get counts of all unique characters
-char_counts = Counter()
-for sent in brown_sents:
-    char_counts.update(sent)    
-print(f"{char_counts=}")
-
-# sort the characters by count
-char_counts = dict(sorted(char_counts.items(), key=lambda item: item[1], reverse=True))
-
-#%%
-# plot distribution of characters
-import matplotlib.pyplot as plt
-fig, ax = plt.subplots()
-ax.bar(char_counts.keys(), char_counts.values())
-ax.set_title('Character Distribution')
-ax.set_xlabel('Character')
-ax.set_ylabel('Count')
-plt.show()
-
-#%%
-# train a bigram language model
-n = 2
-train_data, padded_sents = padded_everygram_pipeline(order=n, text=brown_sents)
-lm = MLE(order=n)
-lm.fit(train_data, padded_sents)
-
-#%%
-lm.entropy([list('fr')])
-
-#%%
-plaintext_vocab_sz = len(lm.vocab)
-print(f"{plaintext_vocab_sz=}")
-
-#%%
-#%% Convert LM to transition matrix
 import numpy as np
-
-# get the vocabulary
-vocab = sorted(lm.vocab)
-# drop <UNK>
-vocab.remove('<UNK>')
-print(f"{vocab=}")
-# get the vocabulary size
-vocab_sz = len(vocab)
-# create a transition matrix
-transmat = np.zeros((vocab_sz, vocab_sz))
-# fill the transition matrix
-for i, char in enumerate(vocab):
-    for j, next_char in enumerate(vocab):
-        if next_char == '</s>' and char == '</s>':
-            transmat[i, j] = 1
-        else:
-            transmat[i, j] = lm.score(next_char, [char])
-
-print(f"{transmat.shape=}")
-# sum the rows to make sure they sum to 1
-print(f"{transmat.sum(axis=1)=}")
-
-#%% Create a simple substitution cipher
-# create a mapping from plaintext to ciphertext
-# but make sure <s> maps to <s> and </s> maps to </s> and <UNK> maps to <UNK> and ' ' maps to ' '
-mapping = {'<s>': '<s>', '</s>': '</s>', '<UNK>': '<UNK>', ' ': ' '}
-# add the remaining characters
-for char in vocab:
-    if char not in mapping:
-        mapping[char] = random.choice([c for c in vocab if c not in mapping.values()])
-
-pt2ct = mapping
-ct2pt = {v: k for k, v in mapping.items()}
-print(f"{pt2ct=}")
-print(f"{ct2pt=}")
-
-#%%
-# set plaintext and ciphertext
-plaintext = 'grand jury said friday an investigation'
-ciphertext = ''.join([pt2ct[char] for char in plaintext])
-print(f"{plaintext=}")
-print(f"{ciphertext=}")
-
-#%%
-# Convert ciphertext and plaintext to integers
-plaintext_ints = [vocab.index(char) for char in plaintext]
-ciphertext_ints = [vocab.index(char) for char in ciphertext]
-
-print(f"{plaintext_ints=}")
-print(f"{ciphertext_ints=}")
-
-#%%
-# convert ciphertext_ints to plaintext
-deciphered = [ct2pt[vocab[i]] for i in ciphertext_ints]
-print(f"{deciphered=}")
-
-#%%
-
+from tqdm import tqdm
 from hmmlearn import hmm
 
-X_train = np.array([ciphertext_ints]).T
-print(f"{X_train=}")
+from nltk.corpus import brown
+from nltk.lm.preprocessing import padded_everygram_pipeline
+from nltk.lm import MLE
+from nltk.util import pad_sequence
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
 
-#%%
-best_score = best_model = None
-n_fits = 10000
-np.random.seed(13)
-for idx in range(n_fits):
-    model = hmm.CategoricalHMM(
-        n_components=vocab_sz,
-        random_state=idx,
-        params='e',
-        init_params='e'
-        )
+def load_and_process_corpus(n_sentences=1000):
+    sents = brown.sents()[:n_sentences]
+    # lowercase and remove special characters
+    sents = [[word.lower() for word in sent if word.isalpha()] for sent in sents]
+    # join words into sentences
+    sents = [' '.join(sent) for sent in sents]
+    # tokenize the sentences into characters
+    chars = [list(sent) for sent in sents]
+    return chars
+
+def train_bigram_lm(text, order=2):
+    train_data, padded_sents = padded_everygram_pipeline(order=order, text=text)
+    lm = MLE(order=order)
+    print(f"Training {order}-gram language model...")
+    lm.fit(train_data, padded_sents)
+    print("Done.")
+    return lm
+
+def get_plaintext_vocab(lm):
+    vocab_pt = sorted(lm.vocab)
+    # drop <UNK>
+    vocab_pt.remove('<UNK>')
+
+    pt2int = {c: i for i, c in enumerate(vocab_pt)}
+    int2pt = {i: c for i, c in enumerate(vocab_pt)}
+
+    return vocab_pt, pt2int, int2pt
+
+def get_ciphertext_vocab(ciphertext, order=2):
+    # pad ciphertext
+    # ciphertext = list(pad_sequence(ciphertext,
+    # n=order, pad_left=True,
+    # left_pad_symbol="<s>",
+    # pad_right=True,
+    # right_pad_symbol="</s>",))
+    _, ciphertext = padded_everygram_pipeline(order=order, text=[list(ciphertext)])
+    ciphertext = list(ciphertext)
+    # print(f"{list(ciphertext)=}")
+    # foo
+    vocab_ct = sorted(set(ciphertext))
+    ct2int = {c: i for i, c in enumerate(vocab_ct)}
+    int2ct = {i: c for i, c in enumerate(vocab_ct)}
+    return vocab_ct, ct2int, int2ct, ciphertext
+
+def get_simple_sub_key(vocab_pt):
+    # create a mapping from plaintext to ciphertext
+    # but make sure <s> maps to <s> and </s> maps to </s> and <UNK> maps to <UNK> and ' ' maps to ' '
+    mapping = {'<s>': '<s>', '</s>': '</s>', ' ': ' '}
+    # add the remaining characters
+    for char in vocab_pt:
+        if char not in mapping:
+            mapping[char] = random.choice([c for c in vocab_pt if c not in mapping.values()])
+
+    pt2ct = mapping
+    ct2pt = {v: k for k, v in mapping.items()}
+    return pt2ct, ct2pt
+
+def encipher_text(text, pt2ct):
+    ciphertext = [pt2ct[c] for c in text]
+    return ciphertext
+
+def convert_lm_to_tm(lm, vocab):
+    tm = np.zeros((len(vocab), len(vocab)))
+    for i, c in enumerate(vocab):
+        for j, d in enumerate(vocab):
+            if c == '</s>' and d == '</s>':
+                tm[i, j] = 1
+            else:
+                tm[i, j] = lm.score(d, [c])
+
+    # assert rows sum to 1
+    # print(tm.sum(axis=1))
     
-    model.n_features = vocab_sz
-    
-    # set startprob to alawys start on first state
-    # model.startprob_ = np.zeros(plaintext_vocab_sz)
-    # model.startprob_[0] = 1
-    # set starprob to uniform
-    model.startprob_ = np.ones(vocab_sz) / vocab_sz
-    
-    # set transition probabilities from language model
-    model.transmat_ = transmat
+    return tm
 
-    # set emission probabilities to random
-    # model.emissionprob_ = np.random.rand(vocab_sz, vocab_sz) # plaintext -> ciphertext
-    # # normalize the emission probabilities
-    # model.emissionprob_ /= model.emissionprob_.sum(axis=1)[:, np.newaxis]
-    # print(f"{model.emissionprob_.shape=}")
+def main(
+    text_to_encipher: str = 'legislators',
+    seed: int = 42,
+):
+    set_seed(seed=42)
+
+    text = load_and_process_corpus(n_sentences=10000)
+    # print(text[5])
+    # print(repr(''.join(text[5])))
+
+    # train bigram language model on text
+    lm = train_bigram_lm(text, order=2)
+    # print(f"{lm.score('a', ['b'])=}")
+    # print(f"{lm.counts['b']=}")
+    # print(f"{lm.counts[['b']]['a']=}")
+    # print(f"{lm.counts[['b']]['a']/lm.counts['b']=}")
+
+    vocab_pt, pt2int, int2pt = get_plaintext_vocab(lm)    
+    print(f"{vocab_pt=}")
+    # print(f"{pt2int=}")
+    # print(f"{int2pt=}")
+    pt2ct, ct2pt = get_simple_sub_key(vocab_pt)
+    # print(f"{pt2ct=}")
+    # print(f"{ct2pt=}")
+    text_to_encipher = ''.join(text[5])
+    print(f"{text_to_encipher=}")
+    ciphertext = encipher_text(text_to_encipher, pt2ct)
+    # sanity check that ciphertext decodes to plaintext
+    # plaintext = ''.join([ct2pt[c] for c in ciphertext])
+    # print(f"{plaintext=}")
     
-    model.fit(X_train)
-    score = model.score(X_train)
-    # print(f'Model #{idx}\tScore: {score}')
-    if best_score is None or score > best_score:
-        best_model = model
-        best_score = score
+    vocab_ct, ct2int, int2ct, ciphertext = get_ciphertext_vocab(ciphertext)
+    # print(f"{vocab_ct=}")
+    # print(f"{ct2int=}")
+    # print(f"{int2ct=}")
+    print(f"{ciphertext=}")
 
-print(f'Best score:      {best_score}')        
-# use the Viterbi algorithm to predict the most likely sequence of states
-# given the model
-states = best_model.predict(X_train)
-print(f"{states=}")
+    # ct_ints = [ct2int[c] for c in ciphertext]
+    # print(f"{ct_ints=}")
 
-deciphered = [ct2pt[vocab[i]] for i in states]
-print(f"{deciphered=}")
+    # check how LM scores ciphertext
+    # ngrams, _ = padded_everygram_pipeline(order=2, text=[list(text_to_encipher)])
+    # convert generator to list
+    # for n in ngrams:
+    #     grams = [x for x in n]
+    #     print(f"{grams=}")
+    #     print(lm.entropy(grams))
+    # print(f"{ngrams=}")
+    # print(lm.entropy(ngrams))
+
+    # convert LM to transition matrix
+    transmat = convert_lm_to_tm(lm, vocab_pt)
+    print(f"{transmat.shape=}")
+    # First hidden state is always <s>
+    startprob = np.zeros(len(vocab_pt))
+    startprob[pt2int['<s>']] = 1
+    print(f"{startprob.shape=}")
+    print(f"{startprob=}")
+
+    X_train = np.array([[ct2int[c] for c in ciphertext]]).T
+    # print(f"{X_train=}")
+    print(f"{X_train.shape=}")
+
+    # Train HMM    
+    best_score = best_model = best_idx = None
+    n_fits = 10000
+
+    f = tqdm(range(n_fits))
+    for idx in f:
+        f.set_description(f"Fitting {idx}")
+        model = hmm.CategoricalHMM(
+            n_components=len(vocab_pt),
+            random_state=idx,
+            params='e',
+            init_params='e'
+            )
+        
+        # model.n_features = vocab_sz
+        
+        # set startprob to alawys start on first state
+        # model.startprob_ = np.zeros(plaintext_vocab_sz)
+        # model.startprob_[0] = 1
+        # set starprob to uniform
+        model.startprob_ = startprob
+        
+        # set transition probabilities from language model
+        model.transmat_ = transmat
+
+        # set emission probabilities to random
+        # model.emissionprob_ = np.random.rand(vocab_sz, vocab_sz) # plaintext -> ciphertext
+        # # normalize the emission probabilities
+        # model.emissionprob_ /= model.emissionprob_.sum(axis=1)[:, np.newaxis]
+        # print(f"{model.emissionprob_.shape=}")
+        
+        model.fit(X_train)
+        score = model.score(X_train)
+        # print(f'Model #{idx}\tScore: {score}')
+        if best_score is None or score > best_score:
+            best_model = model
+            best_score = score
+            best_idx = idx
+    
+    # use the Viterbi algorithm to predict the most likely sequence of states
+    # given the model
+    states = best_model.predict(X_train)
+    print(f"{states=}")
+    # convert states to plaintext
+    pred_plaintext = ''.join([int2pt[s] for s in states])
+    print(f"{pred_plaintext=}")
+    print(f"{text_to_encipher=}")
+    target_states = np.array([pt2int[ct2pt[c]] for c in ciphertext])
+    print(f"{target_states=}")
+    # print matches between predicted and target states
+    matches = np.where(states == target_states)[0]
+    print(f"{matches=}")
+    print(f"{len(matches)/len(states)=}")
+
+
+if __name__ == '__main__':
+    main()
