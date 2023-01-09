@@ -9,6 +9,9 @@ from nltk.lm.preprocessing import padded_everygram_pipeline
 from nltk.lm import MLE
 from nltk.util import pad_sequence
 
+from hmm_pytorch import HMM
+import torch
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -94,6 +97,7 @@ def main(
 ):
     set_seed(seed=42)
 
+    # text = load_and_process_corpus(n_sentences=1000000)
     text = load_and_process_corpus(n_sentences=10000)
     # print(text[5])
     # print(repr(''.join(text[5])))
@@ -153,57 +157,99 @@ def main(
 
     # Train HMM    
     best_score = best_model = best_idx = None
-    n_fits = 10000
+    n_fits = 10_000
 
+
+    X_train = torch.from_numpy(X_train)
     f = tqdm(range(n_fits))
     for idx in f:
         f.set_description(f"Fitting {idx}")
-        model = hmm.CategoricalHMM(
-            n_components=len(vocab_pt),
+        model = HMM(
+            n_states = len(vocab_pt),
+            n_obs=len(vocab_ct),
+            start_prob = torch.from_numpy(startprob),
+            transition=torch.from_numpy(transmat),
             random_state=idx,
-            params='e',
-            init_params='e'
             )
-        
-        # model.n_features = vocab_sz
-        
-        # set startprob to alawys start on first state
-        # model.startprob_ = np.zeros(plaintext_vocab_sz)
-        # model.startprob_[0] = 1
-        # set starprob to uniform
-        model.startprob_ = startprob
-        
-        # set transition probabilities from language model
-        model.transmat_ = transmat
 
-        # set emission probabilities to random
-        # model.emissionprob_ = np.random.rand(vocab_sz, vocab_sz) # plaintext -> ciphertext
-        # # normalize the emission probabilities
-        # model.emissionprob_ /= model.emissionprob_.sum(axis=1)[:, np.newaxis]
-        # print(f"{model.emissionprob_.shape=}")
+        # update emission matrix until convergence
+        tol=1e-6
+        max_iter=1000
+        for i in range(max_iter):
+            model.update_emission(X_train)
+            # check if score has converged
+            score = model.score_obs(X_train)
+            print(f"{score=}")
+            if abs(score - score) < tol:
+                break
         
-        model.fit(X_train)
-        score = model.score(X_train)
-        # print(f'Model #{idx}\tScore: {score}')
         if best_score is None or score > best_score:
             best_model = model
             best_score = score
             best_idx = idx
+            
+
+    # f = tqdm(range(n_fits))
+    # for idx in f:
+    #     f.set_description(f"Fitting {idx}")
+    #     model = hmm.CategoricalHMM(
+    #         n_components=len(vocab_pt),
+    #         random_state=idx,
+    #         params='e',
+    #         init_params='e'
+    #         )
+        
+    #     # model.n_features = vocab_sz
+        
+    #     # set startprob to alawys start on first state
+    #     # model.startprob_ = np.zeros(plaintext_vocab_sz)
+    #     # model.startprob_[0] = 1
+    #     # set starprob to uniform
+    #     model.startprob_ = startprob
+        
+    #     # set transition probabilities from language model
+    #     model.transmat_ = transmat
+
+    #     # set emission probabilities to random
+    #     # model.emissionprob_ = np.random.rand(vocab_sz, vocab_sz) # plaintext -> ciphertext
+    #     # # normalize the emission probabilities
+    #     # model.emissionprob_ /= model.emissionprob_.sum(axis=1)[:, np.newaxis]
+    #     # print(f"{model.emissionprob_.shape=}")
+        
+    #     model.fit(X_train)
+    #     score = model.score(X_train)
+    #     # print(f'Model #{idx}\tScore: {score}')
+    #     if best_score is None or score > best_score:
+    #         best_model = model
+    #         best_score = score
+    #         best_idx = idx
     
-    # use the Viterbi algorithm to predict the most likely sequence of states
-    # given the model
-    states = best_model.predict(X_train)
-    print(f"{states=}")
-    # convert states to plaintext
-    pred_plaintext = ''.join([int2pt[s] for s in states])
-    print(f"{pred_plaintext=}")
-    print(f"{text_to_encipher=}")
-    target_states = np.array([pt2int[ct2pt[c]] for c in ciphertext])
-    print(f"{target_states=}")
-    # print matches between predicted and target states
-    matches = np.where(states == target_states)[0]
-    print(f"{matches=}")
-    print(f"{len(matches)/len(states)=}")
+    # # use the Viterbi algorithm to predict the most likely sequence of states
+    # # given the model
+    # states = best_model.predict(X_train)
+    # print(f"{states=}")
+    # # convert states to plaintext
+    # pred_plaintext = ''.join([int2pt[s] for s in states])
+    # print(f"{pred_plaintext=}")
+    # print(f"{text_to_encipher=}")
+    # target_states = np.array([pt2int[ct2pt[c]] for c in ciphertext])
+    # print(f"{target_states=}")
+    # # print matches between predicted and target states
+    # matches = np.where(states == target_states)[0]
+    # print(f"{matches=}")
+    # print(f"{len(matches)/len(states)=}")
+
+    # # take argmax of emission probabilities to get most likely ciphertext -> plaintext mapping
+    # pred_key = np.argmax(best_model.emissionprob_, axis=0)
+    # print(f"{pred_key=}")
+    # # convert to plaintext
+    # # remove last dimension from X_train
+    # X_train = X_train.squeeze()
+    # pred_states = [pred_key[c_int] for c_int in X_train]
+    # print(f"{pred_states=}")
+    # pred_plaintext = ''.join([int2pt[s] for s in pred_states])
+    # print(f"{pred_plaintext=}")
+    
 
 
 if __name__ == '__main__':
