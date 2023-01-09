@@ -34,6 +34,10 @@ class HMM(torch.nn.Module):
         emission = torch.nn.Parameter(torch.rand(
             n_states, n_obs)) if emission is None else emission
         
+        # if any of the start_probs are equal to 0, add a small value (1e-15)
+        # this is to avoid log(0) = -inf
+        start_prob = torch.where(start_prob == 0, torch.tensor(1e-15), start_prob)
+
         # normalize parameters
         self.start_prob = start_prob / start_prob.sum()
         self.transition = transition / transition.sum(axis=1)[:, None]
@@ -71,18 +75,18 @@ class HMM(torch.nn.Module):
         T = len(obs)
         alpha = torch.zeros(self.n_states, T)
         # alpha[:, 0] = self.start_prob * self.emission[:, obs[0]]
-        print(f"{obs[:10]=}")
+        # print(f"{obs[:10]=}")
         # print(f"{obs.shape=}")
         # print(f"{self.start_prob.shape=}")
         # print(f"{torch.log(self.emission[:, obs[0]]).squeeze(1).shape=}")
 
-        print(f"{self.start_prob=}")
-        print(f"{self.emission.sum(dim=1)=}")
+        # print(f"{self.start_prob=}")
+        # print(f"{self.emission.sum(dim=1)=}")
 
         alpha[:, 0] = torch.log(self.start_prob) + \
             torch.log(self.emission[:, obs[0]].squeeze(1))
 
-        print(f"{alpha=}")
+        # print(f"{alpha=}")
         
         for t in range(1, T):
             # TODO torch.logsumexp(alpha[:, t-1] broadcasting? or be explicit?
@@ -94,8 +98,8 @@ class HMM(torch.nn.Module):
 
             alpha[:, t] = (torch.logsumexp(alpha[:, t-1] + torch.log(self.transition), dim=1)
                            + torch.log(self.emission[:, obs[t]].squeeze(1)))
-            print(f"{alpha=}")
-        foo
+        # print(f"{alpha=}")
+
         return alpha
 
     def score_obs(self, obs):
@@ -111,7 +115,10 @@ class HMM(torch.nn.Module):
             Probability of the given sequence of observations.
         """
         alpha = self.forward_algorithm(obs)
-        return torch.logsumexp(alpha[:, -1], dim=0)
+        # print(f"{alpha=}")
+        score = torch.logsumexp(alpha[:, -1], dim=0)
+        # print(f"{score=}")
+        return score
 
     def backward_algorithm(self, obs):
         """
@@ -128,12 +135,13 @@ class HMM(torch.nn.Module):
         """
         T = len(obs)
         beta = torch.zeros(self.n_states, T)
-        beta[:, -1] = 1
+        beta[:, -1] = 0
         
         for t in range(T-2, -1, -1):
             # beta[:, t] = (self.transition @ (self.emission[:, obs[t+1]] * beta[:, t+1]))
             beta[:, t] = torch.logsumexp(
-                torch.log(self.transition) + torch.log(self.emission[:, obs[t+1]]) + torch.log(beta[:, t+1]), dim=1
+                torch.log(self.transition) + torch.log(self.emission[:, obs[t+1]]) + torch.log(beta[:, t+1]),
+                dim=1,
             )
         return beta
 
@@ -147,6 +155,11 @@ class HMM(torch.nn.Module):
         """
         alpha = self.forward_algorithm(obs)
         beta = self.backward_algorithm(obs)
+
+        print(f"{alpha=}")
+        print(f"{beta=}")
+        foo
+
         gamma = alpha + beta
         gamma = torch.exp(gamma - torch.logsumexp(gamma, dim=0))
         
