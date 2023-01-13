@@ -158,10 +158,13 @@ def main(
     # Train HMM    
     best_score = best_model = best_idx = None
     n_fits = 10_000
+    
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = 'cpu'
+    print(f"{device=}")
+    X_train = torch.from_numpy(X_train).to(device)    
 
-
-    X_train = torch.from_numpy(X_train)
-    f = tqdm(range(n_fits))
+    f = tqdm(range(n_fits))    
     for idx in f:
         f.set_description(f"Fitting {idx}")
         model = HMM(
@@ -170,23 +173,37 @@ def main(
             start_prob = torch.from_numpy(startprob),
             transition=torch.from_numpy(transmat),
             random_state=idx,
+            device=device,
             )
+        model = model.to(device)
 
+        print(f"{model.transition.is_cuda=}")
+        print(f"{model.emission.is_cuda=}")
+        print(f"{model.start_prob.is_cuda=}")
+
+        print(f"{model.start_prob=}")
         # update emission matrix until convergence
+        init_score = model.score_obs(X_train)
+        print(f"{init_score=}")
+        # foo
+        
         tol=1e-6
-        max_iter=1000
+        max_iter=100000
+        last_score = -np.inf
         for i in range(max_iter):
             model.update_emission(X_train)
             # check if score has converged
             score = model.score_obs(X_train)
-            print(f"{score=}")
-            if abs(score - score) < tol:
+            if abs(last_score - score) < tol:
                 break
-        
+            last_score = score
+                
         if best_score is None or score > best_score:
             best_model = model
             best_score = score
             best_idx = idx
+        print(f"{best_score=}")
+        print(f"{score=}")
             
 
     # f = tqdm(range(n_fits))
