@@ -159,7 +159,7 @@ class HMM(torch.nn.Module):
         # foo
 
         gamma = alpha + beta
-        gamma = torch.exp(gamma - torch.logsumexp(gamma, dim=0))
+        gamma = torch.exp(gamma - torch.logsumexp(gamma, dim=0)) # [states, T]
         
         # print(f"{gamma.shape=}")
         # print(f"{gamma.is_cuda=}")

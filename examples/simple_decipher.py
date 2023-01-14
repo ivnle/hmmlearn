@@ -108,8 +108,8 @@ def convert_3gram_lm_to_tm(lm, unigrams):
     # get product of vocab x vocab
     bigrams = list(itertools.product(unigrams, unigrams))
     idx2bigram = {}
-    tm = np.zeros((len(bigrams), len(bigrams)))    
-    
+    tm = np.zeros((len(bigrams), len(bigrams)))
+
     for i, (a, b) in enumerate(bigrams):
         idx2bigram[i] = (a, b)
         for j, (c, d) in enumerate(bigrams):
@@ -117,12 +117,18 @@ def convert_3gram_lm_to_tm(lm, unigrams):
                 tm[i, j] = lm.score(d, [a, b])
 
     # for all rows that sum to 0, set columns to uniform distribution
+    # for only columns where the first char of its corresponding tuple
+    # matches the second char of the row's corresponding tuple
     for i, row in enumerate(tm):
-        if np.sum(row) == 0:
-            tm[i, :] = 1/len(bigrams)
-    
-    # Check that rows sum to 1
-    # print(tm)
+        if (np.sum(row)) == 0:
+            # columns where the first char of its corresponding tuple
+            # matches the second char of the row's corresponding tuple
+            cols = [j for j, (c, _) in enumerate(bigrams) if c == idx2bigram[i][1]]
+            tm[i, cols] = 1 / len(cols)
+
+    #Check that rows sum to 1
+    # print(f"{tm[0, :]}=")
+    # print(f"{tm[1, :]}=")
 
     # print(tm[chars2index[('<s>', '<s>')], :])
     # print(np.sum(tm, axis=1))
@@ -133,7 +139,7 @@ def convert_3gram_lm_to_tm(lm, unigrams):
     # TODO this is wrong, use repeat for emission matrix
     # consider looping over two arrays, each array is comprised of (char_1, char_2)
     # use collections product
-    
+    # foo
     # print(tm)
     # print(tm.shape)
     # foo
@@ -141,37 +147,152 @@ def convert_3gram_lm_to_tm(lm, unigrams):
     return tm, idx2bigram
 
 
-def decipher(ngrams=1 seed=42):
-    
+def decipher(ngrams=2, seed=42):
+
     set_seed(seed=seed)
-    text = load_and_process_corpus(n_sentences=10000)    
+    text = load_and_process_corpus(n_sentences=10000)
     lm = train_ngram_lm(text, order=ngrams)
+    # print([v for v in lm.vocab])
+    # foo
     vocab_pt, pt2int, int2pt = get_plaintext_vocab(lm)
     pt2ct, ct2pt = get_simple_sub_key(vocab_pt)
     text_to_encipher = ''.join(text[5])
     ciphertext = encipher_text(text_to_encipher, pt2ct)
-    vocab_ct, ct2int, int2ct, ciphertext = get_ciphertext_vocab(ciphertext)    
-    
-    if ngrams == 1:
+
+    # set order=2 because only the hidden states conditioned on the previous two hidden states
+    # the emissions are only conditioned on its parent hidden state
+    vocab_ct, ct2int, int2ct, ciphertext = get_ciphertext_vocab(ciphertext, order=2)
+    print(f"{repr(''.join([ct2pt[c] for c in ciphertext]))=}")
+
+    if ngrams == 2:
         transmat = convert_2gram_lm_to_tm(lm, vocab_pt)
         startprob = np.zeros(len(vocab_pt))
         startprob[pt2int['<s>']] = 1
-        X_train = np.array([[ct2int[c] for c in ciphertext]]).T
-    elif ngrams == 2:
+        n_states = len(vocab_pt)
+    elif ngrams == 3:
         transmat, idx2bigram = convert_3gram_lm_to_tm(lm, vocab_pt)
         bigram2idx = {v: k for k, v in idx2bigram.items()}
-        
+        startprob = np.zeros(len(bigram2idx))
+        startprob[bigram2idx[('<s>', '<s>')]] = 1
+        n_states = len(bigram2idx)                
     else:
         raise ValueError(f"{ngrams=}")
 
     # Train HMM
+    X_train = np.array([[ct2int[c] for c in ciphertext]]).T
     best_score = best_model = best_idx = None
-    n_fits = 1
+    n_fits = 100
+
+    f = tqdm(range(n_fits))
+    for idx in f:
+        f.set_description(f"Fitting {idx}")
+        model = hmm.CategoricalHMM(
+            n_components=n_states,
+            random_state=idx,
+            params='e',
+            init_params='e' if ngrams == 2 else '',
+            implementation='scaling', # faster than 'log'
+        )
+
+        # model.n_features = vocab_sz
+
+        # set startprob to alawys start on first state
+        # model.startprob_ = np.zeros(plaintext_vocab_sz)
+        # model.startprob_[0] = 1
+        # set starprob to uniform
+        model.startprob_ = startprob
+
+        # set transition probabilities from language model
+        model.transmat_ = transmat
+
+        # set emission probabilities to random
+        if ngrams == 3:
+            np.random.seed(idx)
+            emissionmat = np.random.rand(len(vocab_pt), len(vocab_ct)) # [n_states, n_obs]            
+            # emissionmat[[pt2int['<s>'] + len(vocab_pt)*i for i in range(len(vocab_pt))], ct2int['<s>']] = 1e6
+            # emissionmat[[pt2int['</s>'] + len(vocab_pt)*i for i in range(len(vocab_pt))], ct2int['</s>']] = 1e6
+            emissionmat = emissionmat / np.sum(emissionmat, axis=1, keepdims=True)
+            # set </s> -> </s> to 1
+
+            
+            # for b, i in bigram2idx.items():
+            #     if b[-1] == '<s>':
+            #         print(i)
+            # foo
+            
+            # repeat rows of emission matrix n times
+            emissionmat = np.repeat(emissionmat, len(vocab_pt), axis=0)
+            model.emissionprob_ = emissionmat
+
+        # print(f"{model.emissionprob_[:len(vocab_pt)+2, :]=}")
+        # print(f"{model.emissionprob_[len(vocab_pt):2*len(vocab_pt), :]=}")
+        # foo
+
+        model.fit(X_train)
+        score = model.score(X_train)
+        
+        # print(f'Model #{idx}\tScore: {score}')
+        # print(f"{model.emissionprob_[:len(vocab_pt), :]=}")
+        # print(f"{model.emissionprob_[len(vocab_pt):2*len(vocab_pt), :]=}")
+        # foo
+
+        if best_score is None or score > best_score:
+            best_model = model
+            best_score = score
+            best_idx = idx
+
+    states = best_model.predict(X_train)
+    
+    if ngrams == 3:
+        pred_plaintext = ''.join([idx2bigram[s][-1] for s in states])
+        print(f"{repr(pred_plaintext)=}")
+
+        pred_plaintext = [idx2bigram[s] for s in states]
+        print(f"{repr(pred_plaintext)=}")
+
+        target_states = [bigram2idx[(ct2pt[ciphertext[i]], ct2pt[ciphertext[i+1]])]
+                            for i in range(len(ciphertext)-1)]
+        print(f"{target_states=}")
+        print(f"{states=}")
+        matches = np.where(states == target_states)[0]
+        print(f"{len(matches)/len(states)=}")
+
+        print("ct2pt:", ''.join([idx2bigram[i][-1] for i in target_states]))
+
+
+    # use the Viterbi algorithm to predict the most likely sequence of states
+    # given the model
+    states = best_model.predict(X_train)
+    print(f"{states=}")
+    # convert states to plaintext
+    pred_plaintext = ''.join([int2pt[s] for s in states])
+    print(f"{pred_plaintext=}")
+    print(f"{text_to_encipher=}")
+    target_states = np.array([pt2int[ct2pt[c]] for c in ciphertext])
+    print(f"{target_states=}")
+    # print matches between predicted and target states
+    matches = np.where(states == target_states)[0]
+    print(f"{matches=}")
+    print(f"{len(matches)/len(states)=}")
+
+    # take argmax of emission probabilities to get most likely ciphertext -> plaintext mapping
+    pred_key = np.argmax(best_model.emissionprob_, axis=0)
+    print(f"{pred_key=}")
+    # convert to plaintext
+    # remove last dimension from X_train
+    X_train = X_train.squeeze()
+    pred_states = [pred_key[c_int] for c_int in X_train]
+    print(f"{pred_states=}")
+    pred_plaintext = ''.join([int2pt[s] for s in pred_states])
+    print(f"{pred_plaintext=}")
+
 
 def main(
     text_to_encipher: str = 'legislators',
     seed: int = 42,
 ):
+    decipher(ngrams=3, seed=seed)
+    foo
     set_seed(seed=42)
 
     # text = load_and_process_corpus(n_sentences=1000000)
