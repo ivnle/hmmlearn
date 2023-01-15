@@ -81,7 +81,7 @@ class CategoricalHMM(_emissions.BaseCategoricalHMM, BaseHMM):
                  algorithm="viterbi", random_state=None,
                  n_iter=10, tol=1e-2, verbose=False,
                  params="ste", init_params="ste",
-                 implementation="log"):
+                 implementation="log", order=1):
         """
         Parameters
         ----------
@@ -138,6 +138,7 @@ class CategoricalHMM(_emissions.BaseCategoricalHMM, BaseHMM):
                          params=params, init_params=init_params,
                          implementation=implementation)
         self.emissionprob_prior = emissionprob_prior
+        self.order = order
 
     score_samples, score, decode, predict, predict_proba, sample, fit = map(
         _categoricalhmm_fix_docstring_shape, [
@@ -176,7 +177,16 @@ class CategoricalHMM(_emissions.BaseCategoricalHMM, BaseHMM):
         if 'e' in self.params:
             self.emissionprob_ = np.maximum(
                 self.emissionprob_prior - 1 + stats['obs'], 0)
+            if self.order == 2:
+                n_states = int(np.sqrt(self.n_components))
+                self.emissionprob_ = np.reshape(self.emissionprob_, (n_states, n_states, -1))
+                self.emissionprob_ = np.sum(self.emissionprob_, axis=1)
+            
             normalize(self.emissionprob_, axis=1)
+
+            if self.order == 2:
+            # project back to the original shape
+                self.emissionprob_ = np.repeat(self.emissionprob_, n_states, axis=0)
 
 
 class GaussianHMM(_emissions.BaseGaussianHMM, BaseHMM):

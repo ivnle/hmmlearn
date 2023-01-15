@@ -187,8 +187,8 @@ def convert_3gram_lm_to_tm(lm, unigrams):
 
 
 def decipher(
-    random_restarts: int = 100,
-    training_sequences: int = 1_000_000,
+    random_restarts: int = 10000,
+    training_sequences: int = 1_0_000,
     ngrams=2,
     seed=42
 ) -> None:
@@ -200,7 +200,7 @@ def decipher(
     vocab_pt, pt2int, int2pt = get_plaintext_vocab(lm)
     print(f"Plaintext vocab size = {len(vocab_pt)}")
     pt2ct, ct2pt = get_simple_sub_key(vocab_pt)
-    text_to_encipher = ''.join(text[425])
+    text_to_encipher = ''.join(text[5])
     ciphertext = encipher_text(text_to_encipher, pt2ct)
     
     # set order=2 because only the hidden states conditioned on the previous two hidden states
@@ -238,6 +238,7 @@ def decipher(
             params='e',
             init_params='e' if ngrams == 2 else '',
             implementation='scaling',  # faster than 'log'
+            order=ngrams-1,
         )
 
         model.startprob_ = startprob
@@ -277,28 +278,45 @@ def decipher(
             best_score = score
             best_idx = idx
 
-    # Evaluation
+    ### Evaluation ###
+    best_model.algorithm = 'viterbi'
     states = best_model.predict(X_train)
 
-    if ngrams == 3:
+    if ngrams == 2:
+        pred_plaintext = ''.join([int2pt[s] for s in states])
+        enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
+        ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
+        print(f"predicted plaintext (Viterbi): {pred_plaintext}")
+        print(f"symbol error rate: {round(ser, 4)}")
+
+
+    elif ngrams == 3:        
         pred_plaintext = ''.join([idx2bigram[s][-1] for s in states])
         enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
         ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
         print(f"predicted plaintext (Viterbi): {pred_plaintext}")
-        print(f"symbol error rate (SER): {ser=}")
+        print(f"symbol error rate: {round(ser, 4)}")
 
         emissionmat = project_emission_down(
             best_model.emissionprob_, vocab_pt, vocab_ct)
         pred_ct2pt = convert_emission_to_key(emissionmat, int2pt, int2ct)
         mer = score_predicted_key(pred_ct2pt, ct2pt)
         # print(f"{pred_ct2pt=}")
-        print(f"mapping error rate (MER): {mer=}")
+        print(f"mapping error rate (Key): {mer=}")
 
-        pred_plaintext_mbr = ''.join([pred_ct2pt[c] for c in ciphertext])
-        ser_mbr = score_deciphered_ciphertext(
-            pred_plaintext_mbr, enciphered_text)
+        pred_plaintext_key = ''.join([pred_ct2pt[c] for c in ciphertext])
+        ser_key = score_deciphered_ciphertext(
+            pred_plaintext_key, enciphered_text)
+        print(f"predicted plaintext (Key): {pred_plaintext_key}")
+        print(f"symbol error rate: {round(ser_key, 4)}")
+
+        best_model.algorithm = 'map'
+        states = best_model.predict(X_train)
+        pred_plaintext_mbr = ''.join([idx2bigram[s][-1] for s in states])    
+        ser_mbr = score_deciphered_ciphertext(pred_plaintext_mbr, enciphered_text)
         print(f"predicted plaintext (MBR): {pred_plaintext_mbr}")
-        print(f"symbol error rate (SER): {ser_mbr=}")
+        print(f"symbol error rate: {round(ser_mbr, 4)}")
+    
 
 
 def main(
