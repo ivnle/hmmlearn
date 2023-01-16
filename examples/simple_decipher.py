@@ -53,6 +53,30 @@ def convert_emission_to_key(
     return ct2pt
 
 
+def convert_key_to_emission(
+    ct2pt: dict,
+    pt2int: dict,
+    ct2int: dict
+) -> np.ndarray:
+    """Convert ct2pt key to emission matrix."""
+    emission = np.zeros((len(pt2int), len(ct2int)))
+    for c_ct, i_ct in ct2int.items():
+        i_pt = pt2int[ct2pt[c_ct]]
+        emission[i_pt, i_ct] = 0.5
+    
+    # distribute remaining probability mass
+    for i, row in enumerate(emission):
+        if (np.sum(row)) < 1:
+            emission[i, :] += (1 - np.sum(row)) / len(row)
+    
+    # if row sums to zero, set all values to 1 / len(cols)
+    # for i, row in enumerate(emission):
+    #     if (np.sum(row)) == 0:            
+    #         emission[i, :] = 1 / len(row)
+
+    return emission
+
+
 def score_predicted_key(pred_ct2pt: dict, gold_ct2pt: dict):
     """Score a ct2pt key by comparing it to the gold ct2pt key."""
     score = 0
@@ -187,10 +211,12 @@ def convert_3gram_lm_to_tm(lm, unigrams):
 
 
 def decipher(
-    random_restarts: int = 10000,
-    training_sequences: int = 1_0_000,
-    ngrams=2,
-    seed=42
+    random_restarts: int = 10,
+    training_sequences: int = 1_00_000,
+    ngrams=2,    
+    hmm_impl='hmmlearn', # ['hmmlearn', 'pytorch']
+    seed=42,
+    initialize_with_gold=False,
 ) -> None:
 
     set_seed(seed=seed)
@@ -212,37 +238,65 @@ def decipher(
     print(f"Ciphertxt: {''.join(ciphertext)}")
     print(f"Cipher length: {len(ciphertext)}")
 
+    # Observations
+    X_train = np.array([[ct2int[c] for c in ciphertext]]).T
+    
     if ngrams == 2:
         transmat = convert_2gram_lm_to_tm(lm, vocab_pt)
         startprob = np.zeros(len(vocab_pt))
+        startprob += 1e-15
         startprob[pt2int['<s>']] = 1
-        n_states = len(vocab_pt)
+        startprob /= np.sum(startprob)        
+        n_states = len(vocab_pt)        
+        if hmm_impl == 'pytorch':
+            transmat = torch.tensor(transmat)
+            startprob = torch.tensor(startprob)
+            X_train = torch.tensor(X_train)
     elif ngrams == 3:
         transmat, idx2bigram, bigram2idx = convert_3gram_lm_to_tm(lm, vocab_pt)
         startprob = np.zeros(len(bigram2idx))
         startprob[bigram2idx[('<s>', '<s>')]] = 1
-        n_states = len(bigram2idx)
+        n_states = len(bigram2idx)    
     else:
         raise ValueError(f"{ngrams=}")
 
-    # Train HMM
-    X_train = np.array([[ct2int[c] for c in ciphertext]]).T
+    # Train HMM    
     best_score = best_model = best_idx = None
 
     f = tqdm(range(random_restarts))
     for idx in f:
         f.set_description(f"Fitting {idx}")
-        model = hmm.CategoricalHMM(
-            n_components=n_states,
-            random_state=idx,
-            params='e',
-            init_params='e' if ngrams == 2 else '',
-            implementation='scaling',  # faster than 'log'
-            order=ngrams-1,
-        )
+
+        if hmm_impl == 'hmmlearn':
+            model = hmm.CategoricalHMM(
+                n_components=n_states,
+                random_state=idx,
+                params='e',
+                init_params='e' if ngrams == 2 and not initialize_with_gold else '',
+                implementation='scaling',  # faster than 'log'
+                # implementation='log',
+                order=ngrams-1,
+            )
+        elif hmm_impl == 'pytorch':
+            model = HMM(
+                n_components=n_states,
+                n_features=len(vocab_ct),
+                random_state=idx,
+                params='e',
+                init_params='e',
+                order=1,
+            )
+        else:
+            raise ValueError(f"{hmm_impl=}")
 
         model.startprob_ = startprob
         model.transmat_ = transmat
+        if initialize_with_gold and ngrams == 2:
+            # print("Initializing with gold")
+            emissionprob = convert_key_to_emission(ct2pt, pt2int, ct2int)
+            if hmm_impl == 'pytorch':
+                emissionprob = torch.tensor(emissionprob)
+            model.emissionprob_ = emissionprob
 
         # initialize emission matrix
         if ngrams == 3:
@@ -277,16 +331,27 @@ def decipher(
             best_model = model
             best_score = score
             best_idx = idx
+    
+    print(f"best model: {best_idx}")
+    print(f"best score: {best_score}")
 
     ### Evaluation ###
-    best_model.algorithm = 'viterbi'
-    states = best_model.predict(X_train)
+    # best_model.algorithm = 'viterbi'
+    # states = best_model.predict(X_train)
 
     if ngrams == 2:
+        # pred_plaintext = ''.join([int2pt[s] for s in states])
+        # enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
+        # ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
+        # print(f"predicted plaintext (Viterbi): {pred_plaintext}")
+        # print(f"symbol error rate: {round(ser, 4)}")
+
+        best_model.algorithm = 'map'
+        states = best_model.predict(X_train)
         pred_plaintext = ''.join([int2pt[s] for s in states])
         enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
         ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
-        print(f"predicted plaintext (Viterbi): {pred_plaintext}")
+        print(f"predicted plaintext (MAP): {pred_plaintext}")
         print(f"symbol error rate: {round(ser, 4)}")
 
 
@@ -323,181 +388,9 @@ def main(
     text_to_encipher: str = 'legislators',
     seed: int = 42,
 ):
-    decipher(ngrams=3, seed=seed)
-    foo
-    set_seed(seed=42)
-
-    # text = load_and_process_corpus(n_sentences=1000000)
-    text = load_and_process_corpus(n_sentences=10000)
-    # print(text[5])
-    # print(repr(''.join(text[5])))
-
-    # train bigram language model on text
-    lm = train_ngram_lm(text, order=3)
-    # print(f"{lm.score('a', ['b'])=}")
-    # print(f"{lm.counts['b']=}")
-    # print(f"{lm.counts[['b']]['a']=}")
-    # print(f"{lm.counts[['b']]['a']/lm.counts['b']=}")
-
-    vocab_pt, pt2int, int2pt = get_plaintext_vocab(lm)
-    print(f"{vocab_pt=}")
-    # print(f"{pt2int=}")
-    # print(f"{int2pt=}")
-    pt2ct, ct2pt = get_simple_sub_key(vocab_pt)
-    # print(f"{pt2ct=}")
-    # print(f"{ct2pt=}")
-    text_to_encipher = ''.join(text[5])
-    print(f"{text_to_encipher=}")
-    ciphertext = encipher_text(text_to_encipher, pt2ct)
-    # sanity check that ciphertext decodes to plaintext
-    # plaintext = ''.join([ct2pt[c] for c in ciphertext])
-    # print(f"{plaintext=}")
-
-    vocab_ct, ct2int, int2ct, ciphertext = get_ciphertext_vocab(ciphertext)
-    # print(f"{vocab_ct=}")
-    # print(f"{ct2int=}")
-    # print(f"{int2ct=}")
-    print(f"{ciphertext=}")
-
-    # ct_ints = [ct2int[c] for c in ciphertext]
-    # print(f"{ct_ints=}")
-
-    # check how LM scores ciphertext
-    # ngrams, _ = padded_everygram_pipeline(order=2, text=[list(text_to_encipher)])
-    # convert generator to list
-    # for n in ngrams:
-    #     grams = [x for x in n]
-    #     print(f"{grams=}")
-    #     print(lm.entropy(grams))
-    # print(f"{ngrams=}")
-    # print(lm.entropy(ngrams))
-
-    # convert LM to transition matrix
-    # transmat = convert_2gram_lm_to_tm(lm, vocab_pt)
-    transmat, idx2bigram = convert_3gram_lm_to_tm(lm, vocab_pt)
-    bigram2idx = {v: k for k, v in idx2bigram.items()}
-    print(f"{transmat.shape=}")
-    # First hidden state is always <s>
-    startprob = np.zeros(len(vocab_pt))
-    startprob[pt2int['<s>']] = 1
-    print(f"{startprob.shape=}")
-    print(f"{startprob=}")
-
-    X_train = np.array([[ct2int[c] for c in ciphertext]]).T
-    # print(f"{X_train=}")
-    print(f"{X_train.shape=}")
-
-    # Train HMM
-    best_score = best_model = best_idx = None
-    n_fits = 1
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    # device = 'cpu'
-    print(f"{device=}")
-    X_train = torch.from_numpy(X_train).to(device)
-
-    f = tqdm(range(n_fits))
-    for idx in f:
-        f.set_description(f"Fitting {idx}")
-        model = HMM(
-            n_states=len(vocab_pt),
-            n_obs=len(vocab_ct),
-            start_prob=torch.from_numpy(startprob),
-            transition=torch.from_numpy(transmat),
-            random_state=idx,
-            device=device,
-        )
-        model = model.to(device)
-
-        print(f"{model.transition.is_cuda=}")
-        print(f"{model.emission.is_cuda=}")
-        print(f"{model.start_prob.is_cuda=}")
-
-        print(f"{model.start_prob=}")
-        # update emission matrix until convergence
-        init_score = model.score_obs(X_train)
-        print(f"{init_score=}")
-        # foo
-
-        tol = 1e-6
-        max_iter = 100000
-        last_score = -np.inf
-        for i in range(max_iter):
-            model.update_emission(X_train)
-            # check if score has converged
-            score = model.score_obs(X_train)
-            if abs(last_score - score) < tol:
-                break
-            last_score = score
-
-        if best_score is None or score > best_score:
-            best_model = model
-            best_score = score
-            best_idx = idx
-        print(f"{best_score=}")
-        print(f"{score=}")
-    foo
-
-    f = tqdm(range(n_fits))
-    for idx in f:
-        f.set_description(f"Fitting {idx}")
-        model = hmm.CategoricalHMM(
-            n_components=len(vocab_pt),
-            random_state=idx,
-            params='e',
-            init_params='e'
-        )
-
-        # model.n_features = vocab_sz
-
-        # set startprob to alawys start on first state
-        # model.startprob_ = np.zeros(plaintext_vocab_sz)
-        # model.startprob_[0] = 1
-        # set starprob to uniform
-        model.startprob_ = startprob
-
-        # set transition probabilities from language model
-        model.transmat_ = transmat
-
-        # set emission probabilities to random
-        # model.emissionprob_ = np.random.rand(vocab_sz, vocab_sz) # plaintext -> ciphertext
-        # # normalize the emission probabilities
-        # model.emissionprob_ /= model.emissionprob_.sum(axis=1)[:, np.newaxis]
-        # print(f"{model.emissionprob_.shape=}")
-
-        model.fit(X_train)
-        score = model.score(X_train)
-        # print(f'Model #{idx}\tScore: {score}')
-        if best_score is None or score > best_score:
-            best_model = model
-            best_score = score
-            best_idx = idx
-
-    # use the Viterbi algorithm to predict the most likely sequence of states
-    # given the model
-    states = best_model.predict(X_train)
-    print(f"{states=}")
-    # convert states to plaintext
-    pred_plaintext = ''.join([int2pt[s] for s in states])
-    print(f"{pred_plaintext=}")
-    print(f"{text_to_encipher=}")
-    target_states = np.array([pt2int[ct2pt[c]] for c in ciphertext])
-    print(f"{target_states=}")
-    # print matches between predicted and target states
-    matches = np.where(states == target_states)[0]
-    print(f"{matches=}")
-    print(f"{len(matches)/len(states)=}")
-
-    # take argmax of emission probabilities to get most likely ciphertext -> plaintext mapping
-    pred_key = np.argmax(best_model.emissionprob_, axis=0)
-    print(f"{pred_key=}")
-    # convert to plaintext
-    # remove last dimension from X_train
-    X_train = X_train.squeeze()
-    pred_states = [pred_key[c_int] for c_int in X_train]
-    print(f"{pred_states=}")
-    pred_plaintext = ''.join([int2pt[s] for s in pred_states])
-    print(f"{pred_plaintext=}")
+    decipher(ngrams=2, seed=seed, hmm_impl='hmmlearn', random_restarts=1, initialize_with_gold=True)
+    decipher(ngrams=2, seed=seed, hmm_impl='pytorch', random_restarts=1, initialize_with_gold=True)
+        
 
 
 if __name__ == '__main__':

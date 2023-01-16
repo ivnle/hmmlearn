@@ -3,6 +3,7 @@ Implementation of a Hidden Markov Model in PyTorch.
 """
 
 import torch
+import numpy as np
 
 
 class HMM(torch.nn.Module):
@@ -18,43 +19,68 @@ class HMM(torch.nn.Module):
         Initial state probabilities. If None, random values are used.
     """
 
-    def __init__(self, n_states, n_obs, start_prob=None, transition=None, emission=None, random_state=0, device='cpu'):
+    def __init__(
+        self,
+        n_components,
+        n_features,
+        # startprob_=None,
+        # transition=None,
+        # emission=None,
+        random_state=0,
+        device='cpu',
+        order=1,
+        init_params='ste',
+        params='ste',
+        **kwargs,
+    ) -> None:
         super().__init__()
-        self.n_states = n_states
-        self.n_obs = n_obs
+        self.n_components = n_components
+        self.n_features = n_features
         # set seed with pytorch
-        self.seed = random_state
+        self.random_state = random_state
         self.device = device
-        torch.manual_seed(self.seed)
+        self.algorithm = 'viterbi'
+        torch.manual_seed(self.random_state)
         
+        self.startprob_ = None
+        self.transmat_ = None
+        self.emissionprob_ = None
+
         # initialize parameters
-        start_prob = torch.nn.Parameter(torch.rand(
-            n_states)) if start_prob is None else start_prob
-        transition = torch.nn.Parameter(torch.rand(
-            n_states, n_states)) if transition is None else transition
-        emission = torch.nn.Parameter(torch.rand(n_states, n_obs)) if emission is None else emission
+        if 's' in init_params:
+            startprob_ = torch.nn.Parameter(torch.rand(n_components))
+            # if torch.any(startprob_ == 0):
+            #     startprob_ = startprob_ + 1e-15
+            #     startprob_ = startprob_ / startprob_.sum()        
+            self.startprob_ = (startprob_ / startprob_.sum()).to(self.device)
+        if 't' in init_params:
+            transition = torch.nn.Parameter(torch.rand(n_components, n_components))
+            self.transmat_ = (transition / transition.sum(axis=1)[:, None]).to(self.device)
+        if 'e' in init_params:
+            emission = torch.nn.Parameter(torch.rand(n_components, n_features))
+            self.emissionprob_ = (emission / emission.sum(axis=1)[:, None]).to(self.device)
         
         # if any of the start_probs are equal to 0, add a small value (1e-15)
         # this is to avoid log(0) = -inf
         # start_prob = torch.where(start_prob == 0, torch.tensor(1e-15), start_prob)
         # If any values of start_prob == 0, apply smoothing such that no values end up being 0 but the sum of the probabilities is still 1
-        if torch.any(start_prob == 0):
-            start_prob = start_prob + 1e-15
-            start_prob = start_prob / start_prob.sum()        
+        # if torch.any(startprob_ == 0):
+        #     startprob_ = startprob_ + 1e-15
+        #     startprob_ = startprob_ / startprob_.sum()        
 
         # normalize parameters
-        self.start_prob = (start_prob / start_prob.sum()).to(self.device)
-        self.transition = (transition / transition.sum(axis=1)[:, None]).to(self.device)
-        self.emission = (emission / emission.sum(axis=1)[:, None]).to(self.device)
+        # self.startprob_ = (startprob_ / startprob_.sum()).to(self.device)
+        # self.transmat_ = (transition / transition.sum(axis=1)[:, None]).to(self.device)
+        # self.emissionprob_ = (emission / emission.sum(axis=1)[:, None]).to(self.device)
 
-        self.validate(self.start_prob, self.transition, self.emission)
+        # self.validate(self.startprob_, self.transmat_, self.emissionprob_)
 
     def validate(self, start_prob, transition, emission):
-        if start_prob is not None and len(start_prob) != self.n_states:
+        if start_prob is not None and len(start_prob) != self.n_components:
             raise ValueError("start_prob must have length n_states")
-        if transition is not None and transition.shape != (self.n_states, self.n_states):
+        if transition is not None and transition.shape != (self.n_components, self.n_components):
             raise ValueError("transition must have shape (n_states, n_states)")
-        if emission is not None and emission.shape != (self.n_states, self.n_obs):
+        if emission is not None and emission.shape != (self.n_components, self.n_features):
             raise ValueError("emission must have shape (n_states, n_obs)")
         return True
 
@@ -77,24 +103,24 @@ class HMM(torch.nn.Module):
         """
 
         T = len(obs)
-        alpha = torch.zeros(self.n_states, T).to(self.device)
+        alpha = torch.zeros(self.n_components, T).to(self.device)
 
-        alpha[:, 0] = torch.log(self.start_prob) + \
-            torch.log(self.emission[:, obs[0]].squeeze(1))
+        alpha[:, 0] = torch.log(self.startprob_) + \
+            torch.log(self.emissionprob_[:, obs[0]].squeeze(1))
         
         for t in range(1, T):                
             alpha[:, t] = (
                 torch.logsumexp(
                     alpha[:, t-1].unsqueeze(1) # [states, 1]
-                    + torch.log(self.transition), # [states, states]
+                    + torch.log(self.transmat_), # [states, states]
                     dim=0
                 ) # [states, ]                
-                + torch.log(self.emission[:, obs[t]].squeeze(1))) # [states, ]
+                + torch.log(self.emissionprob_[:, obs[t]].squeeze(1))) # [states, ]
                 # slicing with a tensor obs[t] retains the original dimensionality
 
         return alpha
 
-    def score_obs(self, obs):
+    def score(self, obs):
         """
         Compute the probability of the given sequence of observations.
         Parameters
@@ -124,7 +150,7 @@ class HMM(torch.nn.Module):
             beta_ij = log P(O_j+1, O_j+2, ..., O_T | q_j = S_i, theta)
         """
         T = len(obs)
-        beta = torch.zeros(self.n_states, T).to(self.device)
+        beta = torch.zeros(self.n_components, T).to(self.device)
         # Last column can be left as all 0s instead of 1s because we are in log space
         beta[:, -1] = 1e-15
         
@@ -135,8 +161,8 @@ class HMM(torch.nn.Module):
             # foo
             # beta[:, t] = (self.transition @ (self.emission[:, obs[t+1]] * beta[:, t+1]))
             beta[:, t] = torch.logsumexp(
-                torch.log(self.transition) # [states, states]
-                + torch.log(self.emission[:, obs[t+1]]).squeeze(1).unsqueeze(0) # [1, states]
+                torch.log(self.transmat_) # [states, states]
+                + torch.log(self.emissionprob_[:, obs[t+1]]).squeeze(1).unsqueeze(0) # [1, states]
                 + beta[:, t+1].unsqueeze(0), # [1, states]
                 dim=1,
             )
@@ -165,9 +191,57 @@ class HMM(torch.nn.Module):
         # print(f"{gamma.is_cuda=}")
         # print(f"{torch.nn.functional.one_hot(obs, self.n_obs).float().shape=}")
 
-        self.emission = gamma @ torch.nn.functional.one_hot(
-            obs, self.n_obs).float().squeeze(1)
-        self.emission /= self.emission.sum(axis=1)[:, None]
+        self.emissionprob_ = gamma @ torch.nn.functional.one_hot(
+            obs, self.n_features).float().squeeze(1)
+        self.emissionprob_ /= self.emissionprob_.sum(axis=1)[:, None]
+
+
+    def fit(self, X):
+        tol = 1e-6
+        max_iter = 100000
+        last_score = -np.inf
+        
+        for i in range(max_iter):
+            self.update_emission(X)
+            # check if score has converged
+            score = self.score(X)
+            # print(f"{i=}, {score=}")
+            if abs(last_score - score) < tol:
+                break
+            last_score = score
+
+
+    def predict(self, X):
+        if self.algorithm == "viterbi":
+            return self.viterbi(X)
+        elif self.algorithm == "map":
+            return self.minimum_bayes_risk(X)
+        else:
+            raise ValueError("algorithm must be one of 'viterbi' or 'mbr'")
+
+
+    def minimum_bayes_risk(self, obs):
+        """
+        Compute the minimum Bayes risk of the given sequence of observations.
+        Parameters
+        ----------
+        obs : torch.Tensor
+            Tensor of shape (n_obs,)
+        Returns
+        -------
+        mbr : torch.Tensor
+            Tensor of shape (n_obs,)
+        """
+        T = len(obs)
+        alpha = self.forward_algorithm(obs)
+        beta = self.backward_algorithm(obs)
+        gamma = alpha + beta
+        gamma = torch.exp(gamma - torch.logsumexp(gamma, dim=0))
+        mbr = torch.argmax(gamma, dim=0)
+        # return mbr as array
+        mbr = mbr.cpu().numpy()
+        return mbr
+
 
     def viterbi(self, obs):
         """
@@ -182,16 +256,16 @@ class HMM(torch.nn.Module):
             Tensor of shape (n_obs,)
         """
         T = len(obs)
-        delta = torch.zeros(self.n_states, T)
-        psi = torch.zeros(self.n_states, T, dtype=torch.long)
-        delta[:, 0] = torch.log(self.start_prob) + \
-            torch.log(self.emission[:, obs[0]])
+        delta = torch.zeros(self.n_components, T)
+        psi = torch.zeros(self.n_components, T, dtype=torch.long)
+        delta[:, 0] = torch.log(self.startprob_) + \
+            torch.log(self.emissionprob_[:, obs[0]])
 
         for t in range(1, T):
-            delta[:, t] = torch.max(delta[:, t-1] + torch.log(self.transition), dim=1)[
-                0] + torch.log(self.emission[:, obs[t]])
+            delta[:, t] = torch.max(delta[:, t-1] + torch.log(self.transmat_), dim=1)[
+                0] + torch.log(self.emissionprob_[:, obs[t]])
             psi[:, t] = torch.argmax(
-                delta[:, t-1] + torch.log(self.transition), dim=1)
+                delta[:, t-1] + torch.log(self.transmat_), dim=1)
 
         path = torch.zeros(T, dtype=torch.long)
         path[T-1] = torch.argmax(delta[:, T-1])
