@@ -12,6 +12,7 @@ from nltk.util import pad_sequence
 from hmm_pytorch import HMM
 import torch
 import itertools
+import time
 
 
 def score_deciphered_ciphertext(decipherment: str, plaintext: str):
@@ -212,11 +213,13 @@ def convert_3gram_lm_to_tm(lm, unigrams):
 
 def decipher(
     random_restarts: int = 10,
-    training_sequences: int = 1_00_000,
+    training_sequences: int = 1_000_000,
     ngrams=2,    
     hmm_impl='hmmlearn', # ['hmmlearn', 'pytorch']
     seed=42,
     initialize_with_gold=False,
+    n_iter=100,
+    parallel=False,
 ) -> None:
 
     set_seed(seed=seed)
@@ -238,6 +241,9 @@ def decipher(
     print(f"Ciphertxt: {''.join(ciphertext)}")
     print(f"Cipher length: {len(ciphertext)}")
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = 'cpu' if not parallel else device
+
     # Observations
     X_train = np.array([[ct2int[c] for c in ciphertext]]).T
     
@@ -249,9 +255,9 @@ def decipher(
         startprob /= np.sum(startprob)        
         n_states = len(vocab_pt)        
         if hmm_impl == 'pytorch':
-            transmat = torch.tensor(transmat)
-            startprob = torch.tensor(startprob)
-            X_train = torch.tensor(X_train)
+            transmat = torch.tensor(transmat, requires_grad=False).to(device)
+            startprob = torch.tensor(startprob, requires_grad=False).to(device)
+            X_train = torch.tensor(X_train, requires_grad=False).to(device)
     elif ngrams == 3:
         transmat, idx2bigram, bigram2idx = convert_3gram_lm_to_tm(lm, vocab_pt)
         startprob = np.zeros(len(bigram2idx))
@@ -262,7 +268,7 @@ def decipher(
 
     # Train HMM    
     best_score = best_model = best_idx = None
-
+    time_start = time.time()
     f = tqdm(range(random_restarts))
     for idx in f:
         f.set_description(f"Fitting {idx}")
@@ -285,10 +291,13 @@ def decipher(
                 params='e',
                 init_params='e',
                 order=1,
+                parallel=parallel,
+                restarts=random_restarts,
+                device=device,
             )
         else:
             raise ValueError(f"{hmm_impl=}")
-
+        
         model.startprob_ = startprob
         model.transmat_ = transmat
         if initialize_with_gold and ngrams == 2:
@@ -296,6 +305,8 @@ def decipher(
             emissionprob = convert_key_to_emission(ct2pt, pt2int, ct2int)
             if hmm_impl == 'pytorch':
                 emissionprob = torch.tensor(emissionprob)
+                if parallel:
+                    emissionprob = emissionprob.expand(random_restarts, -1, -1)
             model.emissionprob_ = emissionprob
 
         # initialize emission matrix
@@ -318,7 +329,8 @@ def decipher(
         # print(f"{model.emissionprob_[:len(vocab_pt)+2, :]=}")
         # print(f"{model.emissionprob_[len(vocab_pt):2*len(vocab_pt), :]=}")
         # foo
-
+        # print(f"Initial score: {model.score(X_train)}")
+        model.n_iter = n_iter
         model.fit(X_train)
         score = model.score(X_train)
 
@@ -326,14 +338,23 @@ def decipher(
         # print(f"{model.emissionprob_[:len(vocab_pt), :]=}")
         # print(f"{model.emissionprob_[len(vocab_pt):2*len(vocab_pt), :]=}")
         # foo
-
+        if parallel:
+            restart_idx = torch.argmax(score)
+            score = score[restart_idx]
+        
         if best_score is None or score > best_score:
             best_model = model
             best_score = score
             best_idx = idx
-    
+            best_restart_idx = restart_idx if parallel else None
+        
+        if parallel:
+            break
+    time_end = time.time()
+    print(f"Training time: {round(time_end - time_start, 2)}s")
     print(f"best model: {best_idx}")
     print(f"best score: {best_score}")
+    print(f"best restart_idx: {best_restart_idx}")
 
     ### Evaluation ###
     # best_model.algorithm = 'viterbi'
@@ -348,6 +369,15 @@ def decipher(
 
         best_model.algorithm = 'map'
         states = best_model.predict(X_train)
+        if parallel:
+            states = states[best_restart_idx].tolist()
+        #     for r in states:
+        #         pred_plaintext = ''.join([int2pt[s.item()] for s in r])
+        #         enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
+        #         ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
+        #         print(f"predicted plaintext (MAP): {pred_plaintext}")
+        #         print(f"symbol error rate: {round(ser, 4)}")
+        # else:
         pred_plaintext = ''.join([int2pt[s] for s in states])
         enciphered_text = ''.join([ct2pt[c] for c in ciphertext])
         ser = score_deciphered_ciphertext(pred_plaintext, enciphered_text)
@@ -382,14 +412,22 @@ def decipher(
         print(f"predicted plaintext (MBR): {pred_plaintext_mbr}")
         print(f"symbol error rate: {round(ser_mbr, 4)}")
     
-
+    print(f"{'-'*40}")
 
 def main(
     text_to_encipher: str = 'legislators',
     seed: int = 42,
 ):
-    decipher(ngrams=2, seed=seed, hmm_impl='hmmlearn', random_restarts=1, initialize_with_gold=True)
-    decipher(ngrams=2, seed=seed, hmm_impl='pytorch', random_restarts=1, initialize_with_gold=True)
+    lm_seq = 100_000
+    n_iter = 10
+    random_restarts = 10000
+    init_with_gold=False
+
+    decipher(ngrams=2, seed=seed, hmm_impl='pytorch', random_restarts=random_restarts, initialize_with_gold=init_with_gold, training_sequences=lm_seq, n_iter= n_iter, parallel=True)
+    
+    # decipher(ngrams=2, seed=seed, hmm_impl='pytorch', random_restarts=random_restarts, initialize_with_gold=init_with_gold, training_sequences=lm_seq, n_iter= n_iter, parallel=False)
+
+    decipher(ngrams=2, seed=seed, hmm_impl='hmmlearn', random_restarts=random_restarts, initialize_with_gold=init_with_gold, training_sequences=lm_seq, n_iter= n_iter)
         
 
 
