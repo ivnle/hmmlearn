@@ -149,6 +149,7 @@ class HMM(torch.nn.Module):
                     dim=0 # sum over n_components
                 ) # [n_components, n_components]
                 + torch.log(self.emissionprob_[:, obs[t]].squeeze(-1).unsqueeze(0)) # [1, n_components]
+            )
         
         return alpha
 
@@ -191,11 +192,17 @@ class HMM(torch.nn.Module):
             Probability of the given sequence of observations.
         """
         if self.parallel:
-            return self.score_p(obs)
+            if self.order == 1:
+                return self.score_p(obs)
+            elif self.order == 2:
+                pass # TODO
         else:
-            alpha = self.forward_algorithm(obs) # [states, T]
-            score = torch.logsumexp(alpha[:, -1], dim=0)
-            return score.item()
+            if self.order == 1:
+                alpha = self.forward_algorithm(obs) # [states, T]
+                score = torch.logsumexp(alpha[:, -1], dim=0)
+                return score.item()
+            elif self.order == 2:
+                return self.score_o2(obs)
 
     
     def score_o2(self, obs):
@@ -353,12 +360,24 @@ class HMM(torch.nn.Module):
         
         for i in range(self.n_iter):
             if self.parallel:
-                self.update_emission_p(X)
-            else:
-                self.update_emission(X)
+                if self.order == 1:
+                    self.update_emission_p(X)
+                elif self.order == 2:
+                    pass # TODO
+                else:
+                    raise ValueError("order must be one of 1 or 2")
+            else:                
+                if self.order == 1:
+                    self.update_emission(X)
+                elif self.order == 2:
+                    self.update_emission_o2(X)
+                    
             # check if score has converged
             score = self.score(X)
             # print(f"{i=}, {score=}")
+            # if score < last_score:
+            #     print("score decreased")
+            #     break
             # if abs(last_score - score) < tol:
             #     break
             last_score = score
@@ -369,7 +388,19 @@ class HMM(torch.nn.Module):
         if self.algorithm == "viterbi":
             return self.viterbi(X)
         elif self.algorithm == "map":
-            return self.minimum_bayes_risk_p(X) if self.parallel else self.minimum_bayes_risk(X)
+            if self.parallel:
+                if self.order == 1:
+                    return self.minimum_bayes_risk_p(X) 
+                elif self.order == 2:
+                    pass # TODO
+            else:
+                if self.order == 1:
+                    return self.minimum_bayes_risk(X)
+                elif self.order == 2:
+                    return self.minimum_bayes_risk_o2(X)
+                else:
+                    raise ValueError("order must be one of 1 or 2")
+                
         else:
             raise ValueError("algorithm must be one of 'viterbi' or 'mbr'")
 
@@ -391,6 +422,17 @@ class HMM(torch.nn.Module):
         beta = self.backward_algorithm(obs)
         gamma = alpha + beta
         gamma = torch.exp(gamma - torch.logsumexp(gamma, dim=0))
+        mbr = torch.argmax(gamma, dim=0)
+        # return mbr as array
+        mbr = mbr.cpu().numpy()
+        return mbr
+
+    
+    def minimum_bayes_risk_o2(self, obs):
+        T = len(obs)
+        alpha = self.forward_algorithm_o2(obs)
+        beta = self.backward_algorithm_o2(obs)
+        gamma = torch.logsumexp(alpha + beta, dim=0) # [n_components, T]
         mbr = torch.argmax(gamma, dim=0)
         # return mbr as array
         mbr = mbr.cpu().numpy()
