@@ -130,7 +130,29 @@ class HMM(torch.nn.Module):
 
         return alpha
 
-    
+
+    def forward_algorithm_o2(self, obs):
+        """Forward algoritm for second order HMM."""
+        # startprob_ [n_components, ]
+        # transmat_ [n_components, n_components, n_components]
+        # emissionprob_ [n_components, n_features]
+        T = len(obs)
+        alpha = torch.zeros(self.n_components, self.n_components, T).to(self.device)
+        alpha[:, :, 0] = (torch.log(self.startprob_) # [n_components, ]
+                        + torch.log(self.emissionprob_[:, obs[0]].squeeze(1)) # [n_components, ]
+                        ).unsqueeze(0) # [1, n_components]
+        for t in range(1, T):
+            alpha[:, :, t] = (
+                torch.logsumexp(
+                    alpha[:, :, t-1].unsqueeze(-1) # [n_components, n_components, 1]
+                    + torch.log(self.transmat_), # [n_components, n_components, n_components]
+                    dim=0 # sum over n_components
+                ) # [n_components, n_components]
+                + torch.log(self.emissionprob_[:, obs[t]].squeeze(-1).unsqueeze(0)) # [1, n_components]
+        
+        return alpha
+
+
     def forward_algorithm_p(self, obs):
         """Parallelized version of forward algorithm"""                
         # startprob_ [n_components, ]
@@ -176,6 +198,13 @@ class HMM(torch.nn.Module):
             return score.item()
 
     
+    def score_o2(self, obs):
+        """Score for second order HMM"""
+        alpha = self.forward_algorithm_o2(obs)
+        score = torch.logsumexp(alpha[:, :, -1], dim=(0, 1))
+        return score.item()
+
+    
     def score_p(self, obs):
         """Parallelized version of score function"""
         alpha = self.forward_algorithm_p(obs)
@@ -218,6 +247,23 @@ class HMM(torch.nn.Module):
                 )
                 
             return beta
+
+    
+    def backward_algorithm_o2(self, obs):
+        """Backward algorithm for second order HMM"""
+        T = len(obs)
+        beta = torch.zeros(self.n_components, self.n_components, T).to(self.device)
+        # Last column can be left as all 0s instead of 1s because we are in log space
+        beta[:, :, -1] = 1e-15
+        
+        for t in range(T-2, -1, -1):
+            beta[:, :, t] = torch.logsumexp(
+                torch.log(self.transmat_) # [n_components, n_components, n_components]
+                + torch.log(self.emissionprob_[:, obs[t+1]]).squeeze(-1)[None, None, :] # [1, 1, n_components]
+                + beta[:, :, t+1].unsqueeze(0), # [1, n_components, n_components]
+                dim=2)
+
+        return beta # [n_components, n_components, T]
 
     
     def backward_algorithm_p(self, obs):
@@ -266,6 +312,23 @@ class HMM(torch.nn.Module):
             obs, self.n_features).float().squeeze(1)
         self.emissionprob_ /= self.emissionprob_.sum(axis=1)[:, None]
 
+    
+    def update_emission_o2(self, obs):
+        """Update the emission matrix for second order HMM"""
+        alpha = self.forward_algorithm_o2(obs)
+        beta = self.backward_algorithm_o2(obs)
+        gamma = alpha + beta
+        gamma = torch.logsumexp(gamma, dim=0) # [n_components, T]
+        gamma = torch.exp(
+            gamma # [n_components, T]
+            - torch.logsumexp(gamma, dim=0).unsqueeze(0) # [1, T]
+            ) # [n_components, T]
+        
+        self.emissionprob_ = (gamma # [n_components, T]
+        @ torch.nn.functional.one_hot(obs, self.n_features).float().squeeze(1) # [T, n_features]
+        ) # [n_components, n_features]
+        self.emissionprob_ /= self.emissionprob_.sum(axis=1)[:, None]
+
 
     def update_emission_p(self, obs):
         """Parallelized version of update_emission"""
@@ -282,7 +345,7 @@ class HMM(torch.nn.Module):
             ) # [restarts, n_components, n_features]
         self.emissionprob_ /= self.emissionprob_.sum(axis=2)[:, :, None]
 
-    # TODO don't track gradients to save memory
+
     def fit(self, X):
         tol = 1e-6
         # max_iter = 100000
