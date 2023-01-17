@@ -153,6 +153,29 @@ class HMM(torch.nn.Module):
         
         return alpha
 
+    
+    def forward_algorithm_o2_p(self, obs):
+        """Parallelized version of forward algorithm for second order HMM."""
+        # startprob_ [n_components, ]
+        # transmat_ [n_components, n_components, n_components]
+        # emissionprob_ [restarts, n_components, n_features]
+        # obs [T, ]
+        T = len(obs)
+        alpha = torch.zeros(self.restarts, self.n_components, self.n_components, T).to(self.device)
+        alpha[:, :, :, 0] = (torch.log(self.startprob_) # [n_components, ]
+                        + torch.log(self.emissionprob_[:, :, obs[0]].squeeze(2)) # [restarts, n_components]
+                        ).unsqueeze(1) # [restarts, 1, n_components]
+        for t in range(1, T):
+            alpha[:, :, :, t] = (
+                torch.logsumexp(
+                    alpha[:, :, :, t-1].unsqueeze(-1) # [restarts, n_components, n_components, 1]
+                  + torch.log(self.transmat_).expand(self.restarts, -1, -1, -1), # [restarts, n_components, n_components, n_components]
+                    dim=1 # sum over n_components
+                ) # [restarts, n_components, n_components]
+                + torch.log(self.emissionprob_[:, :, obs[t]].squeeze(2).unsqueeze(1)) # [restarts, 1, n_components]
+            )        
+        return alpha
+
 
     def forward_algorithm_p(self, obs):
         """Parallelized version of forward algorithm"""                
@@ -163,8 +186,9 @@ class HMM(torch.nn.Module):
         
         T = len(obs)
         alpha = torch.zeros(self.restarts, self.n_components, T).to(self.device)
-        alpha[:, :, 0] = torch.log(self.startprob_) + \
-            torch.log(self.emissionprob_[:, :, obs[0]].squeeze(2))
+        alpha[:, :, 0] = (torch.log(self.startprob_) # [n_components, ]
+                        + torch.log(self.emissionprob_[:, :, obs[0]].squeeze(2)) # [restarts, n_components]
+        ) # [restarts, n_components]
         
         for t in range(1, T):                
             alpha[:, :, t] = (
@@ -195,7 +219,7 @@ class HMM(torch.nn.Module):
             if self.order == 1:
                 return self.score_p(obs)
             elif self.order == 2:
-                pass # TODO
+                return self.score_o2_p(obs)
         else:
             if self.order == 1:
                 alpha = self.forward_algorithm(obs) # [states, T]
@@ -210,6 +234,13 @@ class HMM(torch.nn.Module):
         alpha = self.forward_algorithm_o2(obs)
         score = torch.logsumexp(alpha[:, :, -1], dim=(0, 1))
         return score.item()
+
+    
+    def score_o2_p(self, obs):
+        """Parallelized version of score function for second order HMM"""
+        alpha = self.forward_algorithm_o2_p(obs)
+        score = torch.logsumexp(alpha[:, :, :, -1], dim=(1, 2))
+        return score # [restarts, ]
 
     
     def score_p(self, obs):
@@ -271,6 +302,23 @@ class HMM(torch.nn.Module):
                 dim=2)
 
         return beta # [n_components, n_components, T]
+
+    
+    def backward_algorithm_o2_p(self, obs):
+        """Parallelized version of backward algorithm for second order HMM"""
+        T = len(obs)
+        beta = torch.zeros(self.restarts, self.n_components, self.n_components, T).to(self.device)
+        # Last column can be left as all 0s instead of 1s because we are in log space
+        beta[:, :, :, -1] = 1e-15
+        
+        for t in range(T-2, -1, -1):
+            beta[:, :, :, t] = torch.logsumexp(
+                torch.log(self.transmat_.expand(self.restarts, -1, -1, -1)) # [restarts, n_components, n_components, n_components]
+              + torch.log(self.emissionprob_[:, :, obs[t+1]]).squeeze(-1)[:, None, None, :] # [restarts, 1, 1, n_components]
+              + beta[:, :, :, t+1].unsqueeze(1), # [restarts, 1, n_components, n_components],
+                dim=3
+            ) # [restarts, n_components, n_components]
+        return beta # [restarts, n_components, n_components, T]
 
     
     def backward_algorithm_p(self, obs):
@@ -336,6 +384,22 @@ class HMM(torch.nn.Module):
         ) # [n_components, n_features]
         self.emissionprob_ /= self.emissionprob_.sum(axis=1)[:, None]
 
+    
+    def update_emission_o2_p(self, obs):
+        """Parallelized version of update_emission_o2"""
+        alpha = self.forward_algorithm_o2_p(obs)
+        beta = self.backward_algorithm_o2_p(obs)
+        gamma = alpha + beta # [restarts, n_components, n_components, T]
+        gamma = torch.logsumexp(gamma, dim=1) # [restarts, n_components, T]
+        gamma = torch.exp(
+            gamma # [restarts, n_components, T]
+          - torch.logsumexp(gamma, dim=1).unsqueeze(1) # [restarts, 1, T]
+        ) # [restarts, n_components, T]
+        self.emissionprob_ = (gamma # [restarts, n_components, T]
+        @ torch.nn.functional.one_hot(obs, self.n_features).float().squeeze(1) # [T, n_features]
+        ) # [restarts, n_components, n_features]
+        self.emissionprob_ /= self.emissionprob_.sum(axis=2)[:, :, None]        
+
 
     def update_emission_p(self, obs):
         """Parallelized version of update_emission"""
@@ -363,7 +427,7 @@ class HMM(torch.nn.Module):
                 if self.order == 1:
                     self.update_emission_p(X)
                 elif self.order == 2:
-                    pass # TODO
+                    self.update_emission_o2_p(X)
                 else:
                     raise ValueError("order must be one of 1 or 2")
             else:                
@@ -392,7 +456,7 @@ class HMM(torch.nn.Module):
                 if self.order == 1:
                     return self.minimum_bayes_risk_p(X) 
                 elif self.order == 2:
-                    pass # TODO
+                    return self.minimum_bayes_risk_o2_p(X)
             else:
                 if self.order == 1:
                     return self.minimum_bayes_risk(X)
@@ -430,12 +494,21 @@ class HMM(torch.nn.Module):
     
     def minimum_bayes_risk_o2(self, obs):
         T = len(obs)
-        alpha = self.forward_algorithm_o2(obs)
-        beta = self.backward_algorithm_o2(obs)
+        alpha = self.forward_algorithm_o2(obs) # [n_components, n_components, T]
+        beta = self.backward_algorithm_o2(obs) # [n_components, n_components, T]
         gamma = torch.logsumexp(alpha + beta, dim=0) # [n_components, T]
         mbr = torch.argmax(gamma, dim=0)
         # return mbr as array
         mbr = mbr.cpu().numpy()
+        return mbr
+
+    
+    def minimum_bayes_risk_o2_p(self, obs):
+        T = len(obs)
+        alpha = self.forward_algorithm_o2_p(obs) # [restarts, n_components, n_components, T]
+        beta = self.backward_algorithm_o2_p(obs) # [restarts, n_components, n_components, T]
+        gamma = torch.logsumexp(alpha + beta, dim=1) # [restarts, n_components, T]
+        mbr = torch.argmax(gamma, dim=1) # [restarts, T]
         return mbr
 
     
